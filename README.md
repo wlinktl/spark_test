@@ -1,5 +1,6 @@
 "# spark_test" 
 
+ resource contention issue with Hive's metastore when running tests in parallel.
 
 <plugin>
     <groupId>org.apache.maven.plugins</groupId>
