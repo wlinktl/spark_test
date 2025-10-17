@@ -1,0 +1,75 @@
+<plugin>
+    <groupId>org.apache.maven.plugins</groupId>
+    <artifactId>maven-surefire-plugin</artifactId>
+    <version>2.22.0</version>
+    
+    <!-- Default execution - disabled -->
+    <configuration>
+        <skip>true</skip>
+    </configuration>
+    
+    <executions>
+        <!-- Execution 1: Resource-contention tests (sequential, isolated JVMs) -->
+        <execution>
+            <id>hive-write-tests</id>
+            <phase>test</phase>
+            <goals>
+                <goal>test</goal>
+            </goals>
+            <configuration>
+                <skip>false</skip>
+                <forkCount>1</forkCount>
+                <reuseForks>false</reuseForks>
+                <!-- JUnit 5 -->
+                <groups>HiveWrite</groups>
+                <!-- JUnit 4 alternative:
+                <groups>com.yourpackage.HiveWriteTest</groups>
+                -->
+                <argLine>
+                    -Djavax.jdo.option.ConnectionURL=jdbc:h2:mem:testdb;MODE=MySQL;DB_CLOSE_DELAY=-1
+                </argLine>
+            </configuration>
+        </execution>
+        
+        <!-- Execution 2: Fast parallel tests (shared JVMs) -->
+        <execution>
+            <id>fast-parallel-tests</id>
+            <phase>test</phase>
+            <goals>
+                <goal>test</goal>
+            </goals>
+            <configuration>
+                <skip>false</skip>
+                <forkCount>3</forkCount>
+                <reuseForks>true</reuseForks>
+                <!-- JUnit 5 -->
+                <groups>FastTest</groups>
+                <!-- JUnit 4 alternative:
+                <groups>com.yourpackage.FastTest</groups>
+                -->
+                <argLine>
+                    -Djavax.jdo.option.ConnectionURL=jdbc:h2:mem:testdb${surefire.forkNumber};MODE=MySQL;DB_CLOSE_DELAY=-1
+                </argLine>
+            </configuration>
+        </execution>
+        
+        <!-- Execution 3: Untagged tests (default parallel) -->
+        <execution>
+            <id>other-tests</id>
+            <phase>test</phase>
+            <goals>
+                <goal>test</goal>
+            </goals>
+            <configuration>
+                <skip>false</skip>
+                <forkCount>3</forkCount>
+                <reuseForks>true</reuseForks>
+                <!-- JUnit 5 -->
+                <excludedGroups>HiveWrite,FastTest</excludedGroups>
+                <!-- JUnit 4 alternative:
+                <excludedGroups>com.yourpackage.HiveWriteTest,com.yourpackage.FastTest</excludedGroups>
+                -->
+            </configuration>
+        </execution>
+    </executions>
+</plugin>
