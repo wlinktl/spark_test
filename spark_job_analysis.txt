@@ -1,0 +1,224 @@
+spark job analysis
+
+----------------------------------------
+Stage 1 Overview (Image 1):
+
+Total of 12 tasks in this stage
+Input: 60.9 MiB / 273,134 records
+Shuffle Write: 162.9 MiB / 273,134 records
+Only 10 seconds total time across all tasks
+
+The Problem Pattern (Images 4-6):
+
+Task 3 (Index 1): SUCCESS - Completed in 10s, wrote all its shuffle data (162.9 MiB / 273,134 records)
+Tasks 2 and 52 (Index 0, 2): RUNNING - Stuck with no progress, no shuffle write data shown
+11 other tasks also stuck in RUNNING state
+
+
+What Likely Happened
+1. Shuffle Write Bottleneck
+The successful task wrote 162.9 MiB of shuffle data, but the 11 running tasks show no shuffle write metrics at all. This strongly suggests:
+
+Tasks started processing their input data
+They got to the shuffle write phase
+The shuffle write operation hung or blocked - couldn't write to disk or the shuffle service
+Tasks remained in "RUNNING" state but made no progress
+
+2. Possible Root Causes
+Given the symptoms and the fact that adding executors helped:
+Disk I/O Saturation:
+
+
+Executor 1 had too many tasks trying to write shuffle data simultaneously
+→ Disk became bottleneck (too many concurrent writes)
+→ Tasks blocked waiting for disk I/O
+→ Only 1 task succeeded, 11 got stuck
+
+
+External shuffle service on that node was overwhelmed
+→ Tasks couldn't register their shuffle outputs
+→ Blocked indefinitely
+
+
+Insufficient memory to buffer shuffle data before writing
+→ Tasks waiting for memory to become available
+→ One task grabbed resources, others starved
+
+
+Why Adding Executors Helped
+From your timeline screenshot, after executors were added:
+Before (single executor):
+
+Executor 1: [Task 3 ✓] [Task 2 stuck] [Task 52 stuck] ... (9 more stuck)
+            └─ All 12 tasks competing for same resources
+			
+			
+Executor 1: [Task 3 ✓] [Tasks stuck/killed]
+Executor 3: [New tasks succeed]
+Executor 4: [New tasks succeed]
+Executor 5: [New tasks succeed]
+...
+
+
+The Shuffle Write Size Mystery
+Why is shuffle write (162.9 MiB) larger than input (60.9 MiB)?
+This is actually normal for Hive writes and suggests:
+
+Data expansion during serialization - converting in-memory objects to on-disk format
+Metadata overhead - Hive partition information, schema data
+Compression differences - input might be compressed differently than shuffle output
+Dynamic partitioning - writing to multiple partitions creates replication of metadata
+
+Summary Metrics (Image 3)
+The fact that only 1 task completed means:
+
+Min/25th/Median/75th/Max all show identical values (60.9 MiB input, 162.9 MiB shuffle write)
+This is because there's only ONE data point - the single successful task
+The 11 stuck tasks contributed no metrics
+
+What This Tells You
+Your hypothesis is correct:
+
+Shuffle write was the bottleneck - tasks got stuck trying to write shuffle data
+Resource exhaustion on initial executor - likely disk I/O or shuffle service overload
+Dynamic allocation saved the job - adding executors provided fresh resources
+Task retry mechanism - Spark likely killed the stuck tasks and re-ran them on new executors
+
+
+Recommendations
+To prevent this in the future:
+
+Increase spark.executor.instances to avoid overloading single executors
+Tune shuffle parameters: spark.shuffle.file.buffer (default 32KB), spark.reducer.maxSizeInFlight
+Monitor disk I/O on executors during shuffle-heavy operations
+Consider SSD storage for shuffle directories if using spinning disks
+Increase spark.task.maxFailures to allow more retries before job failure
+
+
+-------------------------------------------------------
+
+
+Recommendations
+To prevent this in the future:
+
+Increase spark.executor.instances to avoid overloading single executors
+Tune shuffle parameters: spark.shuffle.file.buffer (default 32KB), spark.reducer.maxSizeInFlight
+Monitor disk I/O on executors during shuffle-heavy operations
+Consider SSD storage for shuffle directories if using spinning disks
+Increase spark.task.maxFailures to allow more retries before job failure
+
+This is a textbook example of resource contention during shuffle operations!
+
+
+------------------------------------------------------
+
+
+tasks timeline
+
+Task Execution Pattern Analysis
+Visual Breakdown by Task Rows:
+Row 1 (Top task):
+
+Entirely bright green (Executor Computing Time)
+Full width, completed quickly
+This is the successful task that finished
+
+Row 2 (Second task):
+
+Small red/pink segment at start (Task Deserialization Time)
+Long bright green segment (Executor Computing Time)
+Tiny yellow segment at end (Shuffle Write Time)
+Small purple segment at very end (Result Serialization Time)
+This task also appears to have completed!
+
+Rows 3-4:
+
+Start later (gap before they begin)
+Dominated by bright green (Executor Computing Time)
+These appear to complete as well
+
+Rows 5-12 (Bottom half):
+
+All start even later (significant gap)
+All show bright green extending to the right edge
+These are the tasks that were likely still running or retried on new executors
+
+Key Insights
+1. Staggered Start Times
+Unlike a typical well-parallelized stage where all tasks start simultaneously, these tasks show three distinct waves:
+
+Wave 1: Tasks 1-2 start immediately
+Wave 2: Tasks 3-4 start after a delay
+Wave 3: Tasks 5-12 start much later
+
+This pattern suggests:
+
+Limited executor slots initially - couldn't run all 12 tasks at once
+Task scheduling delays - had to wait for slots to become available
+Executor addition - the later tasks likely ran on newly added executors
+
+2. The "Black Bar" at Bottom
+That thick black/dark segment near the bottom appears to be:
+
+A timeline marker or separator
+Possibly indicating when executors were added
+Or marking a failure/retry boundary
+
+3. No Visible Shuffle Write for Most Tasks
+Most tasks show:
+
+Dominated by green (computing)
+Very little or no visible yellow (shuffle write)
+This could mean:
+
+Shuffle write was extremely fast (optimistic)
+Shuffle write is included in computing time (likely)
+Tasks didn't reach shuffle write phase (for the stuck ones)
+
+
+
+Reconciling with Previous Screenshots
+From your earlier screenshots, we saw:
+
+12 tasks total
+1 succeeded
+11 were "RUNNING"
+
+But this timeline suggests more tasks may have succeeded. Here's why the discrepancy:
+Possible Explanations:
+
+Snapshot timing - The task table screenshots were taken mid-execution when 11 tasks were still running
+This timeline might be from a retry - After the initial failure, the stage was re-executed with better resource allocation
+Different attempt - This could be "Attempt 1" after "Attempt 0" failed
+
+What the Timeline Really Shows
+Healthy Task Execution:
+
+Row 1: Quick, clean execution (~10s based on your metrics)
+Row 2: Normal task lifecycle with visible phases
+Rows 3-4: Clean execution, just started later
+
+Resource-Constrained Execution:
+
+Rows 5-12: These tasks couldn't start until much later
+They're all computing simultaneously (parallel green bars)
+This indicates executor resources finally became available
+
+
+Time →
+
+[Exec 1] Task 1 ████████ (completes)
+         Task 2 ▓▓████████▓ (completes)
+         
+         ⏸️ (waiting for executor slots...)
+         
+[Exec 1] Task 3      ████████ (completes)  
+[Exec 3] Task 4      ████████ (completes)
+
+         ⏸️ (more executors added...)
+         
+[Exec 1] Task 5              ████████████████
+[Exec 3] Task 6              ████████████████
+[Exec 4] Task 7              ████████████████
+[Exec 5] Task 8              ████████████████
+...      Tasks 9-12          ████████████████
