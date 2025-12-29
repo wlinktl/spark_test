@@ -1,3 +1,84 @@
+Spark Job Failure Analysis: Resource Starvation at Application StartupExecutive SummaryA Spark application failed with multiple jobs showing "Stage cancelled because SparkContext was shut down" after only 9-10 seconds of execution. The root cause was severe executor resource starvation at application startup, not shuffle write errors or data processing issues. Tasks were unable to execute because insufficient executor resources were available.
+
+
+Problem DescriptionObserved SymptomsFailed Jobs:
+
+Job 1: insertInto at HiveWriteComponent.java:163 - 12 tasks (1 succeeded, 11 stuck)
+Job 15: insertInto at HiveWriteComponent.java:163 - 2 tasks (0 succeeded, 2 stuck)
+Job 19: insertInto at HiveWriteComponent.java:163 - Similar pattern to Job 15
+Job 42 (Stage 52): broadcast exchange operation - Failed with thread execution exception
+Key Indicators:
+
+Total execution time before failure: 9-10 seconds
+Tasks stuck in "RUNNING" state but making no progress
+No shuffle write metrics shown for stuck tasks
+Failure reason: "Stage cancelled because SparkContext was shut down"
+HTTP 403 errors when attempting to access task logs
+Executors added later (3, 4, 5, 7, 0) after jobs already failed
+
+Timeline of Events
+
+01:56:05 - Job 1, Stage 1 starts (12 tasks needed)
+01:56:06 - Job 15, Stage 15 starts (2 tasks needed)
+         - Only 1-2 executor slots available total
+         - Task 3 from Stage 1 completes (got lucky, found a slot)
+         - All other tasks stuck in queue waiting for executor resources
+         
+01:56:14 - No progress made, tasks still queued
+         - Dynamic allocation may start detecting backlog
+         
+01:56:15 - SparkContext shutdown triggered (timeout/watchdog)
+         - All stages cancelled
+         - Jobs marked as failed
+         
+01:56:20+ - New executors arrive (too late)
+          - Application retries or new attempt succeeds
+		  
+Root Cause Analysis
+Primary Root Cause: Insufficient Executor Resources at Startup
+Default Spark Configuration (likely in use):
+
+spark.executor.instances = 2              # Only 2 executors by default
+spark.executor.cores = 1                  # 1 core per executor (YARN default)
+Total available task slots = 2 × 1 = 2
+```
+
+**Application Requirements:**
+```
+Stage 1: 12 tasks (needs 12 slots)
+Stage 15: 2 tasks (needs 2 slots)
+Stage 19: 1-2 tasks (needs 1-2 slots)
+Multiple stages running concurrently
+```
+
+**The Problem:**
+With only 2 task slots available but 15+ tasks needing to run across multiple concurrent stages, tasks were queued indefinitely waiting for resources that didn't exist.
+
+### Why Tasks Appeared "RUNNING" But Made No Progress
+
+Tasks were:
+1. Submitted to the Spark scheduler
+2. Marked as "RUNNING" in the scheduler's queue
+3. **Never actually executed on any executor** (no slots available)
+4. Stuck waiting for executor resources
+5. Cancelled when SparkContext shut down
+
+This explains why:
+- Stage 15 with only 2 tasks had 0/2 completion (couldn't even start)
+- Stage 1 had 1/12 completion (one task got lucky and found a slot)
+- No shuffle write metrics appeared (tasks never reached execution phase)
+
+### Secondary Factors
+
+**1. Dynamic Allocation Too Slow**
+If dynamic allocation was enabled, it failed to provision executors quickly enough:
+```
+Problem: Executor provisioning (5-15 seconds) > Application timeout (9-10 seconds)
+Result: New executors arrived after SparkContext already shut down		  
+
+
+
+
 spark job analysis
 
 ----------------------------------------
@@ -222,3 +303,105 @@ Time →
 [Exec 4] Task 7              ████████████████
 [Exec 5] Task 8              ████████████████
 ...      Tasks 9-12          ████████████████
+
+
+
+
+
+The Actual Failure Reason
+Failure Reason: "Stage cancelled because SparkContext was shut down"
+This is a critical finding that completely changes our understanding of what happened.
+What This Actually Means
+SparkContext shutdown is not a normal task failure—it means the entire Spark application was terminated. This can happen for several reasons:
+1. Application-Level Timeout or Kill Signal
+The most likely scenario:
+
+
+
+Stage 52 (and the job containing it):
+1. Started execution at 01:56:22
+2. Had 1 task that started but never completed (0/1 succeeded, 1 running)
+3. Task got stuck (likely during shuffle write as we analyzed)
+4. Application-level timeout triggered
+5. SparkContext shut down
+6. Stage 52 marked as "cancelled"
+
+
+
+Timeline:
+
+01:56:05 - Job 1, Stage 1 starts
+         - 12 tasks created
+         - Task 3 completes successfully (10s)
+         - Tasks 2, 52, and 9 others get stuck
+
+01:56:14 - Task 3 finishes, others still stuck
+
+01:56:22 - Stage 52 starts (related to Job 42)
+         - broadcast exchange operation
+         - 1 task starts
+
+~01:56:25 - Spark detects tasks haven't made progress
+          - Could be:
+            * spark.task.timeout exceeded
+            * Executor heartbeat timeout
+            * Driver-executor communication failure
+          
+~01:56:25 - SparkContext initiates shutdown
+          - All running stages cancelled
+          - Stage 52 shows: "cancelled because SparkContext was shut down"
+          - Job 42, Job 1, etc. marked as failed
+          
+Later     - Dynamic allocation adds new executors (3, 4, 5, 7, 0)
+          - Application attempts recovery or retries
+          - Eventually succeeds
+		  
+
+Root Cause: Severe Executor Resource Starvation
+What happened:
+
+Initial State: Only 1 executor with 1-2 cores available
+Stage 1 starts: Needs 12 task slots, gets 1-2
+One task runs and completes: Uses the available slot
+11 tasks queue up: Waiting for slots
+Stage 15 starts: Needs 2 more task slots
+No slots available: All blocked by Stage 1's queued tasks
+Stage 19 starts: Same problem
+Deadlock/starvation: Multiple stages competing for non-existent resources
+9-10 seconds pass: No progress made
+SparkContext shutdown: Watchdog kills the application
+
+# 1. Start with sufficient executors immediately
+spark.dynamicAllocation.enabled = true
+spark.dynamicAllocation.initialExecutors = 4
+spark.dynamicAllocation.minExecutors = 2
+spark.dynamicAllocation.maxExecutors = 10
+
+# 2. Request executors faster when needed
+spark.dynamicAllocation.schedulerBacklogTimeout = 1s  # Default is 1s, but ensure it's set
+spark.dynamicAllocation.executorIdleTimeout = 60s
+
+# 3. OR just use static allocation with enough executors
+spark.dynamicAllocation.enabled = false
+spark.executor.instances = 6  # Enough for 12+ tasks
+
+# 4. Ensure each executor can run multiple tasks
+spark.executor.cores = 4  # Each executor can run 4 tasks simultaneously
+spark.task.cpus = 1  # Each task needs 1 core
+
+# With 6 executors × 4 cores = 24 task slots
+# More than enough for your 12 tasks in Stage 1 + 2 in Stage 15
+```
+
+## Why Dynamic Allocation Failed You
+
+From your timeline, executors were eventually added (3, 4, 5, 7, 0), but they came **too late**:
+```
+Timeline:
+01:56:05 - Stages start, need resources
+01:56:06 - No resources available
+01:56:10 - Still waiting...
+01:56:14 - Dynamic allocation detects backlog
+01:56:15 - Requests more executors
+01:56:15 - SparkContext shuts down (timeout!)
+01:56:20 - New executors arrive (too late)
