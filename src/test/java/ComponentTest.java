@@ -182,3 +182,73 @@ public class ComponentTest {
         }
     }
 }
+
+
+import org.apache.spark.sql.SparkSession;
+
+public class SparkSQLExceptionHandling {
+    
+    public static void main(String[] args) {
+        SparkSession sparkSession = SparkSession.builder()
+            .appName("Exception Handling Example")
+            .master("local[*]")
+            .getOrCreate();
+        
+        String dropSql = "DROP TABLE IF EXISTS my_table";
+        
+        // Method 1: Catch general Exception
+        try {
+            sparkSession.sql(dropSql);
+            System.out.println("SQL executed successfully");
+        } catch (Exception e) {
+            System.err.println("Error executing SQL: " + e.getMessage());
+            e.printStackTrace();
+            // Handle the exception appropriately
+        }
+        
+        // Method 2: More specific handling (Spark 3.x style)
+        try {
+            sparkSession.sql(dropSql);
+        } catch (RuntimeException e) {
+            // Check exception type at runtime
+            String exceptionClass = e.getClass().getName();
+            
+            if (exceptionClass.contains("AnalysisException")) {
+                System.err.println("Analysis error: " + e.getMessage());
+                // Table doesn't exist or SQL syntax error
+            } else if (exceptionClass.contains("ParseException")) {
+                System.err.println("Parse error: " + e.getMessage());
+                // SQL parsing error
+            } else {
+                System.err.println("Runtime error: " + e.getMessage());
+                throw e; // Re-throw if you can't handle it
+            }
+        }
+        
+        // Method 3: Safe execution with validation
+        try {
+            // Check if table exists first (optional)
+            if (tableExists(sparkSession, "my_table")) {
+                sparkSession.sql("DROP TABLE my_table");
+                System.out.println("Table dropped successfully");
+            } else {
+                System.out.println("Table doesn't exist, skipping drop");
+            }
+        } catch (Exception e) {
+            System.err.println("Unexpected error: " + e.getMessage());
+            // Log and handle appropriately
+        }
+        
+        sparkSession.stop();
+    }
+    
+    // Helper method to check if table exists
+    private static boolean tableExists(SparkSession spark, String tableName) {
+        try {
+            spark.table(tableName);
+            return true;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+}
