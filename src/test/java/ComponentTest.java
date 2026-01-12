@@ -252,3 +252,71 @@ public class SparkSQLExceptionHandling {
         }
     }
 }
+
+
+
+
+import org.apache.spark.sql.Dataset;
+import org.apache.spark.sql.Row;
+import org.apache.spark.sql.SparkSession;
+import org.apache.spark.SparkThrowable;
+import org.apache.spark.sql.AnalysisException;
+import static org.apache.spark.sql.functions.*;
+
+import java.util.Map;
+
+public class HiveDataProcessor {
+    public static void main(String[] args) {
+        SparkSession spark = SparkSession.builder()
+                .appName("StructuredErrorHandling")
+                .config("spark.sql.catalogImplementation", "hive")
+                .enableHiveSupport()
+                .getOrCreate();
+
+        try {
+            // 1. Read from Source Hive Table
+            Dataset<Row> df = spark.table("production.source_orders");
+
+            // 2. Apply Transformations
+            Dataset<Row> transformedDf = df.withColumn("processed_timestamp", current_timestamp())
+                                           .filter(col("amount").gt(0));
+
+            // 3. Write to Destination Hive Table
+            transformedDf.write()
+                .mode("append")
+                .format("hive")
+                .saveAsTable("analytics.processed_orders");
+
+        } catch (Exception e) {
+            handleSparkError(e);
+        } finally {
+            spark.stop();
+        }
+    }
+
+    private static void handleSparkError(Exception e) {
+        // Spark 3.3 introduced the SparkThrowable interface for programmatic access
+        if (e instanceof SparkThrowable) {
+            SparkThrowable st = (SparkThrowable) e;
+            
+            System.err.println("--- Spark Structured Error Detected ---");
+            System.err.println("Error Class: " + st.getErrorClass());
+            System.err.println("SQL State:   " + st.getSqlState());
+            
+            // Accessing dynamic parameters (e.g., table names, column names)
+            Map<String, String> params = st.getMessageParameters();
+            if (params != null) {
+                params.forEach((k, v) -> System.err.println("Detail [" + k + "]: " + v));
+            }
+        } 
+        
+        // Handle specific AnalysisExceptions (e.g., missing tables or columns)
+        if (e instanceof AnalysisException) {
+            System.err.println("Analysis Error: Check table schemas or permissions.");
+        } else {
+            // Generic fallback for JVM/Network issues
+            System.err.println("Generic Execution Error: " + e.getMessage());
+            e.printStackTrace();
+        }
+    }
+}
